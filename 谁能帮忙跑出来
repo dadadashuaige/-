@@ -1,0 +1,324 @@
+import numpy as np
+from numpy import array
+import pandas as pd
+import matplotlib.pyplot as plt                 #matplotlib 是一个广泛使用的数据可视化库，而 pyplot 是其中用于绘制图形的子模块
+import random                                   #提供了生成随机数的函数和方法
+import sys                                      #对Python解释器的访问和控制
+from collections import defaultdict             #一个字典（dictionary）的子类 会为不存在的键创建一个默认值
+from mpl_toolkits.axes_grid1.inset_locator import mark_inset            #一张图片里绘制小图
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+import 14:13                                    #可能是自己写的库或者文件
+
+time_start=14:13.time()
+C_cs = 0.01                                      #单位充放电成本
+n_chp = 0.35                                     #热电联产效率
+q_NG = 9.7                                       #天然气热值
+LR = 0.1
+
+
+def csv_statis():
+    ##########读取csv中的数据统计状态数########
+    df = pd.read_csv('D:\\毕业设计\\代码\\代码\\1hour.csv')                 #使用绝对路径载入数据
+    #df = pd.read_csv('output.csv')                                        #使用相对路径载入数据
+    # data = df.values  # data是数组，直接从文件读出来的数据格式是数组
+    # index1 = list(df.keys())  # 获取原有csv文件的标题，并形成列表
+    # data = list(map(list, zip(*data)))  # map()可以单独列出列表，将数组转换成列表
+    # data = pd.DataFrame(data, index=index1)  # 将data的行列转换
+    # data.to_csv('output2.csv', header = 0)
+    # df = pd.read_csv('output2.csv')
+    # colos = ['pv', 'pload', 'hload', 'pg', 'pt','1','2','3','4','5','6','7','8','9','10']
+    # df.columns=colos
+    return df
+
+
+df = csv_statis()
+df.head()
+print(df.head())
+#统计状态空间
+colos = ['pv', 'pload', 'hload', 'pg', 'pt']
+state_ = df[colos]
+P_pv = df['pv']
+P_pv = np.array(P_pv.tolist())                #列表转换为数组
+P_load = df['pload']
+P_load = np.array(P_load.tolist())
+H_load = df['hload']
+H_load = np.array(H_load.tolist())
+P = df['pt']
+P = np.array(P.tolist())
+P_g = df['pg']
+P_g = np.array(P_g.tolist())
+V_chp = np.zeros((96,))                       # np.zeros是一个numpy库中的函数,用于创建一个指定形状的全0数组
+SOC = np.zeros((96,))
+p_ess = np.zeros((96,))
+
+
+def reset():
+#初始化环境
+    state = {
+        'M': 0,
+        'SOC': 0,
+        'P_pv': 0,
+        'P_load': 0,
+        'H_load': 0,
+        'P': 0,
+        'P_g': 0,
+        'T': 0
+    }
+    #SOC取值为6，8，10，...，24
+    state['SOC'] = random.randint(0, 6) * 5 + 10
+    state['P_pv'] = P_pv[0]
+    state['P_load'] = P_load[0]
+    state['H_load'] = H_load[0]
+    state['P'] = P[0]
+    state['P_g'] = P_g[0]
+
+    V_chp[0] = H_load[0] / (1 - n_chp) * q_NG   #计算状态空间M     #公式17 热供需平衡
+    P_chp = V_chp[0] * q_NG * n_chp                              #公式16 热电联产机组发电能力
+
+    state['M'] = - ((P_pv[0] + P_chp) - P_load[0])               #计算状态M 光伏发电+热发电-电负荷
+    SOC[0] = state['SOC']                                        #电池状态 充放电
+    state['T'] = 0
+
+    return str(state)
+
+
+def step(state, action, T):
+    #############env的动作部分#############
+    reward = 0
+    next_state = {
+        'M': 0,
+        'SOC': 0,
+        'P_pv': 0,
+        'P_load': 0,
+        'H_load': 0,
+        'P': 0,
+        'P_g': 0,
+        'T': 0}
+
+    T = T + 1
+    # action取值为0，1，2，3，4，5，分别代表以-4，-2kW的速度充电、闲置、2，4的速度放电
+    SOC[T] = SOC[T - 1] + (action - 2) * 5
+
+    if SOC[T] > 25:                            #SOC[T]最小为6 最大为24，超过范围则惩罚
+        SOC[T] = 24
+        reward = reward - 100
+    if SOC[T] < 6:
+        SOC[T] = 6
+        reward = reward - 100
+
+    # 购气量根据热负荷计算
+    V_chp[T] = H_load[T] / (1 - n_chp) * q_NG
+    P_chp = V_chp[T] * q_NG * n_chp
+    p_ess[T] = (action - 2) * 2                    #充放电
+
+    #本文中将负荷需求和电能供给的差值作为微网是否从大电网购买电量的标准
+    #如果供大于求，则选择充电，若供小于求，则选择从大电网购电，电量为M
+    M = P_pv[T] + P_chp - P_load[T]-p_ess[T]
+    #计算奖励函数中的D
+    D = P[T] * M                                   #电价*购电量
+
+    for t in range(T):
+        C = P_g[t] * V_chp[t] + C_cs * p_ess[t]    #气体购买成本+电池充放电成本
+    if M < 0:
+        D = 0
+    reward = reward - (C + D)
+
+    #更新状态
+    next_state['P_pv'] = P_pv[T]
+    next_state['P_load'] = P_load[T]
+    next_state['H_load'] = H_load[T]
+    next_state['P'] = P[T]
+    next_state['P_g'] = P_g[T]
+    ###################################
+    V_chp[T] = H_load[T] / (1 - n_chp) * q_NG
+    P_chp = V_chp[T] * q_NG * n_chp
+
+    next_state['M'] = - ((P_pv[T] + P_chp) - P_load[T])
+    next_state['SOC'] = SOC[T]
+    next_state['T'] = T
+
+    if T == 95:
+        done = True
+    else:
+        done = False
+    return reward, str(next_state), T, done
+
+
+class Player:
+    def __init__(self):
+        self.reset()
+        return
+
+    def reset(self):
+        reset()
+        ###self.greedy greedy 策略的探索概论
+        self.greedy = 0.001
+        return
+
+    #greedy策略
+    def behavior_policy(self, Q, state):               #行为策略 负责与环境交互，然后将采集的轨迹数据送给目标策略进行学习
+        ##########greedy策略#############
+
+        state_ = eval(state)                           # eval()函数实现list、dict、tuple、与str之间的转化
+        if state_['M'] >= 0:
+            print(state_['M'])
+            ac_start = 2
+            ac_end = 5
+        else:
+            #print(state_['M'])
+            ac_start =0
+            ac_end = 3
+        sample = np.random.uniform(0, 1)              #生成随机样本
+        if sample > self.greedy:                      #根据Q值选择最优动作
+            act = np.argmax(Q[state][ac_start:ac_end]) + ac_start
+            #print(act)
+        else:                                         #如果随机值小于self.greedy，则进入探索模式，随机选择
+            act = np.random.randint(0, 5)
+        return act
+
+    def target_policy(self, state, Q):                #目标策略
+        value = Q[state]
+        return value
+
+
+    def Qlearning_greedy(self, num_episodes, max_time=100, discount_factor=0.99):
+        #初始化Q值
+        self.Q = defaultdict(lambda: np.zeros(5))
+        q_value = []
+        xias = []
+        qq_value = []  #创建一张空表，装qq的值，便于导出画图
+        for i_episode in range(0, num_episodes + 1):
+            if i_episode % 50 == 0:      #每隔1000个episode仿真 统计一次reward
+                print("\rEpisode {}/{}.".format(i_episode, num_episodes), end="")
+                sys.stdout.flush()                  #刷新缓冲区
+                qq = self.simulate_greedy()
+                print(qq)       #在输出结果中每1000个episode展示一次reward
+                q_value.append(qq)                  #将qq值添加到q_value
+                xias.append(i_episode)
+            episode = []
+            #初始化状态
+            t = 0
+            state = reset()
+            while (1):
+                ######根据策略进行决策##########
+                action = self.behavior_policy(self.Q, state)
+                # reward,next_state,done = env(action,state)
+                #执行动作
+                reward, next_state, next_t, done = step(state=state, action=action, T=t)
+                episode.append((state, action, reward))
+                # print (next_state)
+                # print('argmax',np.argmax(Q[next_state]),'\n')
+                #更新q_value
+                self.Q[state][action] = self.Q[state][action] + LR * (
+                            reward + discount_factor * self.Q[next_state][np.argmax(self.Q[next_state])] -
+                            self.Q[state][action])                    #贝尔曼公式 更新q_value
+                state = next_state
+                t = next_t
+                if done == True:
+                    #经过了24个小时一轮调度完成
+                    break
+
+
+        self.q_value_greedy = q_value
+        self.xias = xias
+
+        qq_value.append(qq)
+
+        #将q_value表格导出
+        # data_df = pd.DataFrame(qq_value)
+        # data_df.to_csv('data/greedy0.05.csv')
+
+
+        # 画图
+        fig = plt.figure(figsize=(10,6))
+        axes = fig.add_subplot(1, 1, 1)
+        # plt.rcParams["axes.titlesize"] = 18
+        plt.rcParams["legend.fontsize"] = 20
+        # plt.rcParams["axes.labelsize"] = 12
+        axes.plot(self.xias, self.q_value_greedy, linewidth=2, linestyle="-", label='greedy-15 min')
+        axes.set_xlabel("Episode", fontproperties="SimHei", fontsize=26)
+        axes.set_ylabel("Episode reward",  fontproperties="SimHei", fontsize=26)
+        # axes.set_ylim([-117000,-107000])
+        axes.legend()
+        plt.xlabel('(a)',  fontproperties="SimHei", fontsize=30)
+        #画局部放大图
+        axins = axes.inset_axes((0.3, 0.3, 0.3, 0.3))
+        axins.plot(self.xias, self.q_value_greedy,  linestyle="-", linewidth=2)
+        zone_left = 10
+        zone_right = 50
+        x_ratio = 0.5
+        y_ratio = 0.5
+        xlim0 = self.xias[zone_left] - (self.xias[zone_right] - self.xias[zone_left]) * x_ratio
+        xlim1 = self.xias[zone_right] + (self.xias[zone_right] - self.xias[zone_left]) * x_ratio
+        y = np.hstack((self.q_value_greedy[zone_left:zone_right]))
+        ylim0 = np.min(y) - (np.max(y) - np.min(y)) * y_ratio
+        ylim1 = np.max(y) + (np.max(y) - np.min(y)) * y_ratio
+        axins.set_xlim(xlim0, xlim1)
+        axins.set_ylim(ylim0, ylim1)
+        mark_inset(axes, axins, loc1=3, loc2=1, fc="none", ec='k', lw=1)
+
+
+        plt.show()
+        return self.Q
+
+    def init_Q(self, Q):
+        for state in range(7):
+            state = state - 3
+            Q[state] = [0.0, 0.0, 0.0]
+        return Q
+
+    def simulate_greedy(self):
+        #######greedy进行仿真##########
+        state = reset()
+        t = 0
+        episode = []
+        ep_reward = 0
+        while (1):
+            action = self.behavior_policy(self.Q, state)
+            # reward,next_state,done = env(action,state)
+            reward, next_state, next_t, done = step(state=state, action=action, T=t)
+            episode.append((action, reward))
+            state = next_state
+            t = next_t
+            ep_reward = ep_reward + reward
+            if done == True:
+                break
+        return ep_reward
+
+
+    def simulate_print_greedy(self):
+        ##########仿真并输出决策##################3
+        state = reset()
+        t = 0
+        episode = []
+        ep_reward = 0
+        while (1):
+            action = self.behavior_policy(self.Q, state)
+            # reward,next_state,done = env(action,state)
+            reward, next_state, next_t, done = step(state=state, action=action, T=t)
+            episode.append(( action, reward))
+            print(next_state)     #输出每一步的状态，观察SOC
+            state = next_state
+            t = next_t
+            ep_reward = ep_reward + reward
+            if done == True:
+                break
+        print('ep_reward', ep_reward)
+        print('greedy_episode', episode)
+        return ep_reward
+
+
+player=Player()
+_=player.Qlearning_greedy(30000)               #30000次迭代
+player.simulate_print_greedy()
+
+time_end=14:13.time()
+print('totally cost',time_end-time_start)
+
+
+
+
+
+
+
+
